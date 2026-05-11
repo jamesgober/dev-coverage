@@ -55,10 +55,14 @@ fn smoke_each_threshold_type_works() {
         covered_lines: 85,
     };
 
-    let line = r.clone().into_check_result(CoverageThreshold::min_line_pct(80.0));
+    let line = r
+        .clone()
+        .into_check_result(CoverageThreshold::min_line_pct(80.0));
     assert!(matches!(line.verdict, dev_report::Verdict::Pass));
 
-    let func = r.clone().into_check_result(CoverageThreshold::min_function_pct(80.0));
+    let func = r
+        .clone()
+        .into_check_result(CoverageThreshold::min_function_pct(80.0));
     assert!(matches!(func.verdict, dev_report::Verdict::Pass));
 
     let region = r.into_check_result(CoverageThreshold::min_region_pct(80.0));
