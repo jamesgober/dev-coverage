@@ -1,6 +1,6 @@
 [package]
 name = "dev-coverage"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 rust-version = "1.85"
 readme = "README.md"
@@ -10,14 +10,14 @@ authors = [
     "James Gober <me@jamesgober.com>"
 ]
 
-description = "Test coverage measurement and regression detection for Rust. Wraps cargo-llvm-cov. Part of the dev-* verification suite."
+description = "Code coverage with regression gates for Rust. Wraps cargo-llvm-cov: line / function / region kill rates, stored baselines, machine-readable verdicts. Part of the dev-* verification collection."
 
 keywords = [
     "coverage",
     "testing",
-    "verification",
     "llvm-cov",
-    "ai-tools"
+    "ci",
+    "regression"
 ]
 
 categories = [
