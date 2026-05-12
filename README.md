@@ -9,6 +9,7 @@
     <a href="https://crates.io/crates/dev-coverage"><img alt="downloads" src="https://img.shields.io/crates/d/dev-coverage.svg"></a>
     <a href="https://docs.rs/dev-coverage"><img alt="docs.rs" src="https://docs.rs/dev-coverage/badge.svg"></a>
     <a href="https://github.com/jamesgober/dev-coverage/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/jamesgober/dev-coverage/actions/workflows/ci.yml/badge.svg"></a>
+    <img alt="MSRV" src="https://img.shields.io/badge/msrv-1.85%2B-blue.svg?style=flat-square" title="Rust Version">
 </p>
 
 <p align="center">
