@@ -101,9 +101,23 @@ fn to_baseline_drops_per_file_detail() {
 }
 
 /// Real subprocess test. Only runs when `cargo-llvm-cov` is installed.
-/// Skipped by default in CI; enable with `cargo test -- --ignored`.
+///
+/// **Important:** when running this test from a `cargo test` invocation
+/// inside this same crate, set `CARGO_TARGET_DIR` to a path *outside*
+/// the workspace. Otherwise the outer `cargo test` holds the lock on
+/// `target/` and the inner `cargo llvm-cov` blocks waiting for it
+/// indefinitely (cargo's well-known target-dir lock).
+///
+/// ```text
+/// CARGO_TARGET_DIR=/tmp/llvm-cov-target cargo test -- --ignored
+/// ```
+///
+/// CI runs this test? No. The deadlock makes it impractical there; the
+/// JSON parser is covered by the fixtures in `src/lib.rs`. This test is
+/// here as a local smoke check for contributors who want to verify the
+/// end-to-end pipeline against their own `cargo-llvm-cov` install.
 #[test]
-#[ignore = "requires cargo-llvm-cov; gated to keep default tests fast"]
+#[ignore = "requires cargo-llvm-cov + CARGO_TARGET_DIR outside the workspace"]
 fn execute_against_real_llvm_cov() {
     let run = CoverageRun::new("dev-coverage", "0.9.0");
     let r = run.execute().expect("cargo-llvm-cov is installed");

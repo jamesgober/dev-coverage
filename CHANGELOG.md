@@ -30,14 +30,14 @@ prior `0.1.0` was a name-claim placeholder.
 - Examples: `with_threshold.rs` (every threshold variant against a constructed result, no subprocess), `baseline.rs` (save → load → diff workflow), `producer.rs` (Producer integration, gated by `DEV_COVERAGE_EXAMPLE_RUN=1`).
 - `examples/basic.rs` polished: gracefully handles `CoverageError::ToolNotInstalled` so `cargo run --example basic` exits cleanly even when `cargo-llvm-cov` is absent.
 - 28 unit tests across `lib.rs`, `baseline.rs`, and `producer.rs`. Coverage includes: threshold pass/fail paths, function and region thresholds, JSON parsing fixtures (summary-only and per-file), parse-error handling, baseline round-trip through `JsonFileBaselineStore`, scope isolation, overwrite semantics, and `CoverageDiff` sign/tolerance logic.
-- 8 integration tests in `tests/smoke.rs`. One real-subprocess test gated by `#[ignore]` so default `cargo test` stays fast; CI runs it via a dedicated `integration` job with `cargo-llvm-cov` installed.
+- 8 integration tests in `tests/smoke.rs`. One real-subprocess test gated by `#[ignore]` — it requires `cargo-llvm-cov` *and* `CARGO_TARGET_DIR` pointing outside the workspace, because the outer `cargo test` already holds the workspace target-dir lock that the inner `cargo llvm-cov` would otherwise block on.
 
 ### Changed
 
 - `cargo install cargo-llvm-cov` is now a real runtime requirement (previously declared but the code did not actually invoke it).
 - README rewritten: removes the "API shape only; subprocess in 0.9.1" disclaimer, documents the baseline workflow, lists the producer integration, and pins MSRV at 1.85.
 - REPS.md tightened: the "SHOULD provide" items (baseline storage, diff against baseline, per-file breakdown) are now MUST-have for 0.9.x.
-- CI workflow: new `integration` job installs `cargo-llvm-cov` via `taiki-e/install-action` and runs the `#[ignore]`d subprocess tests. Path-dep `../dev-report` is cloned in every job so sibling-only checkouts work end-to-end. `actions/checkout` is at `v5`.
+- CI workflow: new `integration` job installs `cargo-llvm-cov` via `taiki-e/install-action` and verifies the tool runs (`cargo llvm-cov --version`) plus that this crate compiles against the freshly-installed toolchain. The full subprocess pipeline is not exercised in CI because invoking `cargo llvm-cov` from inside `cargo test` deadlocks on the workspace target-dir lock; the JSON parser is verified instead by the fixture-based unit tests. Path-dep `../dev-report` is cloned in every job so sibling-only checkouts work end-to-end. `actions/checkout` is at `v5`.
 
 ### Dependencies
 
