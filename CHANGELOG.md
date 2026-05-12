@@ -7,26 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-05-11
+## [0.9.0] - 2026-05-12
+
+This is the foundation release. Everything below lands together; the
+prior `0.1.0` was a name-claim placeholder.
 
 ### Added
 
-- Initial crate skeleton.
-- `CoverageRun` builder.
-- `CoverageResult` with `line_pct`, `function_pct`, `region_pct`,
-  `total_lines`, `covered_lines`.
-- `CoverageThreshold` enum: `MinLinePct`, `MinFunctionPct`,
-  `MinRegionPct`.
-- `CoverageResult::into_check_result(threshold)` produces a
-  `dev-report::CheckResult`.
-- `CoverageError` for tool-missing / subprocess / parse failures.
-- Smoke tests covering pass and fail threshold paths.
+- Real `cargo llvm-cov --json --summary-only` subprocess integration in `CoverageRun::execute`. Detects tool absence and emits `CoverageError::ToolNotInstalled` without panicking.
+- Builder methods on `CoverageRun`: `in_dir(path)`, `workspace()`, `exclude(pattern)`, `feature(name)`, `all_features()`, `no_default_features()`, `per_file()`. Each maps to the corresponding `cargo llvm-cov` flag.
+- `CoverageRun::subject()` and `CoverageRun::subject_version()` accessors.
+- `CoverageResult` expanded: now carries `total_functions`, `covered_functions`, `total_regions`, `covered_regions`, an optional `branch_pct`, and a `files: Vec<FileCoverage>` per-file breakdown (populated when `per_file()` is set on the run).
+- `FileCoverage` type for per-file detail.
+- `CoverageResult::diff(&baseline, tolerance_pct) -> CoverageDiff` compares a current run against a stored baseline. The `regressed` flag fires when any of `line`, `function`, or `region` drops by more than the tolerance.
+- `CoverageResult::to_baseline()` strips per-file detail down to a `Baseline` ready for persistence.
+- `CoverageResult::least_covered_files(n)` returns the lowest-coverage files in ascending order; useful for emitting evidence about hotspots.
+- New `baseline` module with the `Baseline`, `BaselineStore`, and `JsonFileBaselineStore` types. `JsonFileBaselineStore` writes one `<root>/<scope>/<name>.json` file per baseline with atomic write-temp-rename semantics so partial writes never corrupt a comparison.
+- New `producer` module exposing `CoverageProducer`: a `dev_report::Producer` adapter that wraps a `CoverageRun` + `CoverageThreshold` and (optionally) a baseline. Subprocess failures map to a `CheckResult::fail` named `coverage::<subject>` with `Severity::Critical` — no panics.
+- `CoverageDiff` type carrying signed `line_pct_delta`, `function_pct_delta`, `region_pct_delta` plus the `regressed` flag.
+- `CoverageError::Io(io::Error)` variant for filesystem failures (baseline reads/writes).
+- `From<io::Error> for CoverageError` so `?` works against I/O errors.
+- Examples: `with_threshold.rs` (every threshold variant against a constructed result, no subprocess), `baseline.rs` (save → load → diff workflow), `producer.rs` (Producer integration, gated by `DEV_COVERAGE_EXAMPLE_RUN=1`).
+- `examples/basic.rs` polished: gracefully handles `CoverageError::ToolNotInstalled` so `cargo run --example basic` exits cleanly even when `cargo-llvm-cov` is absent.
+- 28 unit tests across `lib.rs`, `baseline.rs`, and `producer.rs`. Coverage includes: threshold pass/fail paths, function and region thresholds, JSON parsing fixtures (summary-only and per-file), parse-error handling, baseline round-trip through `JsonFileBaselineStore`, scope isolation, overwrite semantics, and `CoverageDiff` sign/tolerance logic.
+- 8 integration tests in `tests/smoke.rs`. One real-subprocess test gated by `#[ignore]` so default `cargo test` stays fast; CI runs it via a dedicated `integration` job with `cargo-llvm-cov` installed.
+
+### Changed
+
+- `cargo install cargo-llvm-cov` is now a real runtime requirement (previously declared but the code did not actually invoke it).
+- README rewritten: removes the "API shape only; subprocess in 0.9.1" disclaimer, documents the baseline workflow, lists the producer integration, and pins MSRV at 1.85.
+- REPS.md tightened: the "SHOULD provide" items (baseline storage, diff against baseline, per-file breakdown) are now MUST-have for 0.9.x.
+- CI workflow: new `integration` job installs `cargo-llvm-cov` via `taiki-e/install-action` and runs the `#[ignore]`d subprocess tests. Path-dep `../dev-report` is cloned in every job so sibling-only checkouts work end-to-end. `actions/checkout` is at `v5`.
+
+### Dependencies
+
+- Added: `serde` 1.0 (derive feature), `serde_json` 1.0. Both required for parsing `cargo llvm-cov` JSON output and for serializing baselines.
+- Added: `tempfile` 3 as a `dev-dependency` for the baseline round-trip tests.
 
 ### Note
 
-This is the name-claim release. The actual `cargo-llvm-cov` subprocess
-integration lands in `0.9.1`. `CoverageRun::execute` returns a
-zero-coverage stub result for now.
+`0.1.0` was a name-claim publish with a stub `execute()`. Crates depending on `0.1` will compile against `0.9` because the public API of `0.1.0` (the constructors, the threshold enum, the `into_check_result` flow) is a subset of `0.9.0`'s. Field additions on `CoverageResult` mean direct struct construction must be updated — see the migration block in the README.
 
 [Unreleased]: https://github.com/jamesgober/dev-coverage/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/jamesgober/dev-coverage/releases/tag/v0.9.0
+[0.1.0]: https://github.com/jamesgober/dev-coverage/releases/tag/v0.1.0

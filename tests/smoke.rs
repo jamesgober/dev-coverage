@@ -1,70 +1,112 @@
-use dev_coverage::{CoverageResult, CoverageRun, CoverageThreshold};
+//! Public-API smoke tests.
+//!
+//! `execute()` against a real `cargo llvm-cov` binary is exercised in
+//! an `#[ignore]` test below; the rest construct values directly so the
+//! shape of `CoverageResult` and the threshold paths are covered without
+//! needing the tool installed.
 
-#[test]
-fn smoke_run_builds() {
-    let _r = CoverageRun::new("test-crate", "0.1.0");
-}
+use dev_coverage::{Baseline, CoverageResult, CoverageRun, CoverageThreshold, FileCoverage};
+use dev_report::Verdict;
 
-#[test]
-fn smoke_execute_returns_result() {
-    let run = CoverageRun::new("test-crate", "0.1.0");
-    let r = run.execute().unwrap();
-    assert_eq!(r.name, "test-crate");
-    assert_eq!(r.version, "0.1.0");
-}
-
-#[test]
-fn smoke_threshold_pass_when_coverage_meets_target() {
-    let r = CoverageResult {
+fn fixture(line: f64, func: f64, region: f64) -> CoverageResult {
+    CoverageResult {
         name: "x".into(),
         version: "0.1.0".into(),
-        line_pct: 85.0,
-        function_pct: 90.0,
-        region_pct: 80.0,
+        line_pct: line,
+        function_pct: func,
+        region_pct: region,
+        branch_pct: None,
         total_lines: 100,
-        covered_lines: 85,
-    };
-    let c = r.into_check_result(CoverageThreshold::min_line_pct(80.0));
-    assert!(matches!(c.verdict, dev_report::Verdict::Pass));
+        covered_lines: line as u64,
+        total_functions: 20,
+        covered_functions: (func / 5.0) as u64,
+        total_regions: 50,
+        covered_regions: (region / 2.0) as u64,
+        files: Vec::new(),
+    }
 }
 
 #[test]
-fn smoke_threshold_fail_when_below() {
-    let r = CoverageResult {
-        name: "x".into(),
-        version: "0.1.0".into(),
-        line_pct: 50.0,
-        function_pct: 60.0,
-        region_pct: 40.0,
-        total_lines: 100,
-        covered_lines: 50,
-    };
-    let c = r.into_check_result(CoverageThreshold::min_line_pct(80.0));
-    assert!(matches!(c.verdict, dev_report::Verdict::Fail));
+fn run_builds_with_full_builder_chain() {
+    let _ = CoverageRun::new("test-crate", "0.1.0")
+        .workspace()
+        .all_features()
+        .exclude("tests/*")
+        .feature("alpha")
+        .per_file();
 }
 
 #[test]
-fn smoke_each_threshold_type_works() {
-    let r = CoverageResult {
-        name: "x".into(),
-        version: "0.1.0".into(),
-        line_pct: 85.0,
-        function_pct: 90.0,
-        region_pct: 75.0,
-        total_lines: 100,
-        covered_lines: 85,
-    };
+fn run_accessors_round_trip_args_passed_to_new() {
+    let run = CoverageRun::new("alpha", "1.2.3");
+    assert_eq!(run.subject(), "alpha");
+    assert_eq!(run.subject_version(), "1.2.3");
+}
 
+#[test]
+fn threshold_pass_when_meets_target() {
+    let c = fixture(85.0, 90.0, 80.0).into_check_result(CoverageThreshold::min_line_pct(80.0));
+    assert_eq!(c.verdict, Verdict::Pass);
+}
+
+#[test]
+fn threshold_fail_when_below() {
+    let c = fixture(50.0, 60.0, 40.0).into_check_result(CoverageThreshold::min_line_pct(80.0));
+    assert_eq!(c.verdict, Verdict::Fail);
+}
+
+#[test]
+fn each_threshold_type_works() {
+    let r = fixture(85.0, 90.0, 75.0);
     let line = r
         .clone()
         .into_check_result(CoverageThreshold::min_line_pct(80.0));
-    assert!(matches!(line.verdict, dev_report::Verdict::Pass));
-
     let func = r
         .clone()
         .into_check_result(CoverageThreshold::min_function_pct(80.0));
-    assert!(matches!(func.verdict, dev_report::Verdict::Pass));
-
     let region = r.into_check_result(CoverageThreshold::min_region_pct(80.0));
-    assert!(matches!(region.verdict, dev_report::Verdict::Fail));
+    assert_eq!(line.verdict, Verdict::Pass);
+    assert_eq!(func.verdict, Verdict::Pass);
+    assert_eq!(region.verdict, Verdict::Fail);
+}
+
+#[test]
+fn diff_against_baseline_signs_correctly() {
+    let r = fixture(75.0, 80.0, 70.0);
+    let baseline = Baseline {
+        name: "x".into(),
+        line_pct: 80.0,
+        function_pct: 85.0,
+        region_pct: 75.0,
+    };
+    let d = r.diff(&baseline, 0.0);
+    assert!(d.regressed);
+    assert!(d.line_pct_delta < 0.0);
+}
+
+#[test]
+fn to_baseline_drops_per_file_detail() {
+    let mut r = fixture(80.0, 85.0, 75.0);
+    r.files = vec![FileCoverage {
+        filename: "src/lib.rs".into(),
+        line_pct: 50.0,
+        function_pct: 50.0,
+        region_pct: 50.0,
+        total_lines: 10,
+        covered_lines: 5,
+    }];
+    let b = r.to_baseline();
+    assert_eq!(b.name, "x");
+    assert_eq!(b.line_pct, 80.0);
+}
+
+/// Real subprocess test. Only runs when `cargo-llvm-cov` is installed.
+/// Skipped by default in CI; enable with `cargo test -- --ignored`.
+#[test]
+#[ignore = "requires cargo-llvm-cov; gated to keep default tests fast"]
+fn execute_against_real_llvm_cov() {
+    let run = CoverageRun::new("dev-coverage", "0.9.0");
+    let r = run.execute().expect("cargo-llvm-cov is installed");
+    assert!(r.line_pct >= 0.0);
+    assert!(r.line_pct <= 100.0);
 }

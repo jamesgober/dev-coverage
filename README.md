@@ -21,19 +21,21 @@
 
 ## What it does
 
-`dev-coverage` runs `cargo-llvm-cov` against your project, parses the
-output, and emits results as `dev-report::Report`. It detects coverage
-regressions against a stored baseline and produces a `CheckResult`
-that AI agents and CI gates can act on.
+`dev-coverage` drives [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+against your project, parses the JSON output, and emits results as a
+[`dev-report::Report`](https://docs.rs/dev-report). It compares against a
+stored baseline to flag regressions so AI agents and CI gates can act
+without parsing free-form text.
 
 ## Why a separate crate
 
-Test coverage is the single most important metric for understanding
-test quality. Without it, you don't know how much of your code is
-actually exercised. With it, you can ask: "did this PR drop coverage
-below 80%?" and get a yes/no answer.
+Test coverage is the single most direct way to ask "how much of this
+code is actually exercised?" Without it, every other quality check is
+an opinion. With it, you can answer "did this PR drop line coverage
+below 80%?" or "did this PR introduce a 5-point regression vs. main?"
+as a yes/no decision.
 
-`dev-coverage` makes that question programmable, not interactive.
+`dev-coverage` makes those questions programmable, not interactive.
 
 ## Quick start
 
@@ -42,7 +44,15 @@ below 80%?" and get a yes/no answer.
 dev-coverage = "0.9"
 ```
 
-```rust
+One-time tool install:
+
+```bash
+cargo install cargo-llvm-cov
+```
+
+Drive it from code:
+
+```rust,no_run
 use dev_coverage::{CoverageRun, CoverageThreshold};
 
 let run = CoverageRun::new("my-crate", "0.1.0");
@@ -50,45 +60,148 @@ let result = run.execute()?;
 
 let threshold = CoverageThreshold::min_line_pct(80.0);
 let check = result.into_check_result(threshold);
-// check is a dev_report::CheckResult ready to push into a Report.
+// `check` is a `dev_report::CheckResult` ready to push into a Report.
 # Ok::<(), dev_coverage::CoverageError>(())
 ```
 
+## Threshold types
+
+| Threshold                          | What it measures                                    |
+|------------------------------------|-----------------------------------------------------|
+| `CoverageThreshold::MinLinePct`    | Percent of executable lines exercised by tests.     |
+| `CoverageThreshold::MinFunctionPct`| Percent of functions called by at least one test.   |
+| `CoverageThreshold::MinRegionPct`  | Percent of basic blocks (branch points) exercised.  |
+
+Line coverage is the most common. Region coverage is the strictest.
+
+## Baseline workflow
+
+The headline feature beyond raw measurement: persist a baseline, then
+flag regressions on the next run.
+
+```rust,no_run
+use dev_coverage::{
+    Baseline, BaselineStore, CoverageRun, JsonFileBaselineStore,
+};
+
+let run = CoverageRun::new("my-crate", "0.1.0");
+let result = run.execute()?;
+
+let store = JsonFileBaselineStore::new("coverage-baselines");
+
+// Compare against last run on main.
+if let Some(baseline) = store.load("main", "my-crate")? {
+    let diff = result.diff(&baseline, /* tolerance_pct */ 1.0);
+    if diff.regressed {
+        eprintln!(
+            "coverage regressed: line {:+.2}pp, function {:+.2}pp, region {:+.2}pp",
+            diff.line_pct_delta,
+            diff.function_pct_delta,
+            diff.region_pct_delta,
+        );
+    }
+}
+
+// Persist for next time.
+store.save("main", &result.to_baseline())?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`JsonFileBaselineStore` writes one `<root>/<scope>/<name>.json` per
+baseline with atomic write-temp-rename semantics; a partial write that
+survives a crash will not corrupt the comparison on the next run.
+
+## `Producer` integration
+
+`CoverageProducer` plugs coverage into a multi-producer pipeline driven
+by [`dev-tools`](https://github.com/jamesgober/dev-tools):
+
+```rust,no_run
+use dev_coverage::{CoverageProducer, CoverageRun, CoverageThreshold};
+use dev_report::Producer;
+
+let producer = CoverageProducer::new(
+    CoverageRun::new("my-crate", "0.1.0"),
+    CoverageThreshold::min_line_pct(80.0),
+);
+
+let report = producer.produce();
+println!("{}", report.to_json().unwrap());
+```
+
+When a baseline is wired in via `with_baseline`, the producer pushes a
+second `CheckResult` named `coverage::regression::<subject>` carrying
+the deltas in its `detail` field, with verdict `Fail (Error)` if the
+regression exceeds the tolerance.
+
+## Examples
+
+| File                              | What it shows                                                       |
+|-----------------------------------|---------------------------------------------------------------------|
+| `examples/basic.rs`               | Run coverage against the current crate; emit a `CheckResult`.       |
+| `examples/with_threshold.rs`      | Every `CoverageThreshold` variant against a constructed result.     |
+| `examples/baseline.rs`            | Save a baseline, then diff a new run against it.                    |
+| `examples/producer.rs`            | Wrap a run in `CoverageProducer` (gated by `DEV_COVERAGE_EXAMPLE_RUN`). |
+
 ## Requirements
 
-`cargo-llvm-cov` must be installed on the system:
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) must be
+installed on the system. The crate detects absence and surfaces a
+`CoverageError::ToolNotInstalled` rather than panicking.
 
 ```bash
 cargo install cargo-llvm-cov
 ```
 
-This is the only required external tool. The crate itself has no
-dependencies beyond `dev-report`.
+The crate's own dependency footprint is small: `dev-report`, `serde`,
+`serde_json`.
 
-## Threshold types
+## Migration from `0.1.0`
 
-| Threshold                          | What it measures                                     |
-|------------------------------------|------------------------------------------------------|
-| `CoverageThreshold::MinLinePct`    | Percent of executable lines exercised by tests.      |
-| `CoverageThreshold::MinFunctionPct`| Percent of functions called by at least one test.    |
-| `CoverageThreshold::MinRegionPct`  | Percent of basic blocks (branch points) exercised.   |
+`CoverageResult` gained `branch_pct`, `total_functions`,
+`covered_functions`, `total_regions`, `covered_regions`, and `files`.
+If you constructed `CoverageResult` literals in `0.1.0`, fill in the
+new fields:
 
-Line coverage is the most common; region coverage is the most strict.
+```rust
+# use dev_coverage::CoverageResult;
+let _r = CoverageResult {
+    name: "x".into(),
+    version: "0.1.0".into(),
+    line_pct: 85.0,
+    function_pct: 90.0,
+    region_pct: 80.0,
+    // new in 0.9.0:
+    branch_pct: None,
+    total_lines: 100,
+    covered_lines: 85,
+    total_functions: 20,
+    covered_functions: 18,
+    total_regions: 50,
+    covered_regions: 40,
+    files: Vec::new(),
+};
+```
+
+The constructor surface (`CoverageRun::new`, `CoverageThreshold::min_*`,
+`CoverageResult::into_check_result`) is unchanged.
 
 ## The `dev-*` suite
 
 See [`dev-tools`](https://github.com/jamesgober/dev-tools) for the
-full suite.
+umbrella crate covering the full suite.
 
 ## Status
 
-`v0.9.0` is the foundation release: API shape is defined, the
-`cargo-llvm-cov` integration lands in `0.9.1`. Production use is
-discouraged until `1.0`.
+`v0.9.x` is the pre-1.0 stabilization line. The API is feature-complete
+for coverage measurement, baseline storage, and regression detection.
+Production use is fine; `1.0` will pin the public API and the wire
+format.
 
 ## Minimum supported Rust version
 
-`1.85` — pinned in `Cargo.toml` and verified by CI.
+`1.85` — pinned in `Cargo.toml` via `rust-version` and verified by the
+MSRV job in CI.
 
 ## License
 

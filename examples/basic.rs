@@ -1,12 +1,30 @@
-//! Minimal example: run coverage and emit a CheckResult.
+//! Run coverage on the current crate, print the percentages, emit a `CheckResult`.
 //!
-//! Run with: `cargo run --example basic`
+//! ```text
+//! cargo install cargo-llvm-cov   # one-time setup
+//! cargo run --example basic
+//! ```
+//!
+//! Requires `cargo-llvm-cov` to be installed. If it is not, the example
+//! prints a clear error and exits 0 (so `cargo build --examples` in CI
+//! still succeeds without the tool).
 
-use dev_coverage::{CoverageRun, CoverageThreshold};
+use dev_coverage::{CoverageError, CoverageRun, CoverageThreshold};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     let run = CoverageRun::new("example", "0.1.0");
-    let result = run.execute()?;
+    let result = match run.execute() {
+        Ok(r) => r,
+        Err(CoverageError::ToolNotInstalled) => {
+            eprintln!("cargo-llvm-cov is not installed; skipping the example.");
+            eprintln!("Install with: cargo install cargo-llvm-cov");
+            return;
+        }
+        Err(e) => {
+            eprintln!("coverage run failed: {e}");
+            return;
+        }
+    };
 
     println!("Line coverage:     {:.2}%", result.line_pct);
     println!("Function coverage: {:.2}%", result.function_pct);
@@ -18,5 +36,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(d) = check.detail {
         println!("Detail:  {d}");
     }
-    Ok(())
 }
