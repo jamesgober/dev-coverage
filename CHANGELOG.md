@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-05-12
+
+Documentation and SEO pass. No code changes.
+
+### Changed
+
+- README header standardized to match the collection-wide template: Rust logo image, MSRV badge between CI and docs.rs (was at the end of the badge list), copyright block at bottom. MSRV badge label switched from lowercase `msrv` to uppercase `MSRV` for visual consistency across the collection.
+- Subtitle now reads `CODE COVERAGE WITH REGRESSION GATES` (was `TEST COVERAGE FOR RUST`). Lifts the regression-gating value to the title.
+- Tagline rewritten to lead with what the crate does (wraps llvm-cov, gates against a baseline) rather than the part-of-suite framing.
+- `## What it does` consumer language widened beyond AI agents.
+- `## The dev-* suite` retitled to `The dev-* collection` and expanded from a one-liner to the full 14-crate map.
+- `Cargo.toml` description rewritten: lists what the crate measures (line / function / region kill rates), what it stores (baselines), what it emits (verdicts).
+- `Cargo.toml` keywords retuned: dropped `verification` and `ai-tools`, added `ci` and `regression` for crates.io search.
+
+### Added
+
+- "Part of the `dev-*` verification collection" block on the README, under the intro, linking the umbrella `dev-tools` crate.
+
+[0.9.1]: https://github.com/jamesgober/dev-coverage/releases/tag/v0.9.1
+
 ## [0.9.0] - 2026-05-12
 
 This is the foundation release. Everything below lands together; the
