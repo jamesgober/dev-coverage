@@ -7,24 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.2] - 2026-05-18
+## [0.9.2] - 2026-10-09
 
-MSRV rollback to Rust 1.75. Backed off from 1.85 after `dev-fixtures`
-swapped `tempfile` → `mod-tempdir` 1.0 in its own 0.9.5 release,
-eliminating the `getrandom 0.4.2 → edition2024` chain that was the
-sole reason the dev-* collection sat at 1.85. No code changes here;
-this crate's own runtime dependencies have always been
-1.75-compatible.
+Parser, tool-detection and baseline fixes from a review pass, a run
+time limit, and the MSRV rollback to Rust 1.75. The rollback follows
+`dev-fixtures` 0.9.5 swapping `tempfile` for `mod-tempdir` 1.0, which
+removed the `getrandom 0.4.2 -> edition2024` chain that held the dev-*
+collection at 1.85.
+
+### Added
+
+- `CoverageRun::timeout(Duration)`. Without it a hung test blocked
+  `execute()` forever. When the limit expires the whole
+  `cargo llvm-cov` process tree is killed (`taskkill /T` on Windows, the
+  process group on Unix) and reaped.
+- `VERSION` constant with the crate version as compiled, so tools that
+  bundle this crate can report what is actually linked.
+
+### Fixed
+
+- `branch_pct` was `Some(0.0)` when branch coverage was off: current
+  cargo-llvm-cov (0.8.x) always emits a `branches` block, with a count
+  of 0 when branches are not measured. It is now `None` in that case.
+- A missing `percent` field read as 0%. It is now computed from
+  `covered / count`, and is 0 (never NaN) when the count is 0.
+- Any failing `cargo llvm-cov --version` was reported as
+  `ToolNotInstalled`, and the probe ran in the wrong directory. Only
+  cargo's "no such command" error means not installed now; other
+  failures become `SubprocessFailed` with stderr. The probe runs in the
+  work dir, and a missing work dir gives a clear error.
+- `SubprocessFailed` now includes the exit status, not only stderr
+  (which could be empty).
+- A NaN threshold passed every run, and a NaN tolerance or baseline
+  value hid regressions. Both now fail.
+- Baseline store: saving deleted the old file before renaming, so a
+  save was not atomic, and concurrent saves shared one temp file. The
+  rename now replaces the target directly and the temp name is per
+  process. `load` no longer races between an existence check and the
+  read. A `scope` or `name` of `..`, an absolute path or a drive prefix
+  could write outside the store root; those are now rejected with
+  `InvalidInput` (nested branch names like `feature/x` still work).
+- A unit test ran a full coverage pass of the crate itself when
+  cargo-llvm-cov was installed (over three minutes).
 
 ### Changed
 
-- `rust-version` lowered from `1.85` to `1.75` in `Cargo.toml`.
-- MSRV badge in README updated from `1.85+` to `1.75+`.
+- `per_file()` dropped `--summary-only` and parsed the full export even
+  though the summary already carries per-file totals, and `files` was
+  filled on every run although the docs say it stays empty unless
+  `per_file()` is set. Every run now uses the summary export, and
+  `files` is filled only with `per_file()`, as documented. Callers that
+  read `files` without calling `per_file()` need to add that call.
+- `rust-version` lowered from `1.85` to `1.75`. CI's MSRV job now
+  builds on 1.75 against an MSRV-compatible lockfile; it was still
+  pinned to 1.85.
 
-### Notes
+### Documentation
 
-- No code change. No API change. No new dependencies.
-- Library, examples, and tests all build clean on Rust 1.75 (verified).
+- `exclude()` takes a package spec, not a file pattern; the rustdoc
+  example used `"tests/*"`.
+- README tagline and the `Cargo.toml` description said "kill rates"
+  (mutation-testing wording) instead of coverage.
+- New README section on scoping and time limits; MSRV section says 1.75.
+- `docs/API.md` brought up to date (missing fields, the `Io` error, and
+  examples that did not compile).
 
 [0.9.2]: https://github.com/jamesgober/dev-coverage/releases/tag/v0.9.2
 

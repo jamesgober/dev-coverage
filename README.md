@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-    <strong>Wraps <code>cargo-llvm-cov</code> and gates PR coverage against a stored baseline.</strong> Line, function, and region kill rates as machine-readable verdicts.
+    <strong>Wraps <code>cargo-llvm-cov</code> and gates PR coverage against a stored baseline.</strong> Line, function, and region coverage as machine-readable verdicts.
 </p>
 
 <br>
@@ -72,6 +72,27 @@ let check = result.into_check_result(threshold);
 // `check` is a `dev_report::CheckResult` ready to push into a Report.
 # Ok::<(), dev_coverage::CoverageError>(())
 ```
+
+## Scoping and time limits
+
+```rust,no_run
+use dev_coverage::CoverageRun;
+use std::time::Duration;
+
+let run = CoverageRun::new("my-crate", "0.1.0")
+    .in_dir("path/to/workspace")
+    .workspace()
+    .exclude("my-crate-bench") // a package name, not a file pattern
+    .all_features()
+    .per_file() // keep the per-file breakdown in `result.files`
+    .timeout(Duration::from_secs(900)); // kill the run if a test hangs
+let result = run.execute()?;
+# Ok::<(), dev_coverage::CoverageError>(())
+```
+
+Without `timeout`, a hung test blocks `execute` forever. With it, the
+whole `cargo llvm-cov` process tree is killed when the limit expires and
+`execute` returns `CoverageError::SubprocessFailed`.
 
 ## Threshold types
 
@@ -224,7 +245,7 @@ format.
 
 ## Minimum supported Rust version
 
-`1.85` — pinned in `Cargo.toml` via `rust-version` and verified by the
+`1.75` — pinned in `Cargo.toml` via `rust-version` and verified by the
 MSRV job in CI.
 
 ## License

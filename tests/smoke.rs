@@ -31,9 +31,10 @@ fn run_builds_with_full_builder_chain() {
     let _ = CoverageRun::new("test-crate", "0.1.0")
         .workspace()
         .all_features()
-        .exclude("tests/*")
+        .exclude("test-crate-bench")
         .feature("alpha")
-        .per_file();
+        .per_file()
+        .timeout(std::time::Duration::from_secs(600));
 }
 
 #[test]

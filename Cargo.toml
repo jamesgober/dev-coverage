@@ -10,7 +10,7 @@ authors = [
     "James Gober <me@jamesgober.com>"
 ]
 
-description = "Code coverage with regression gates for Rust. Wraps cargo-llvm-cov: line / function / region kill rates, stored baselines, machine-readable verdicts. Part of the dev-* verification collection."
+description = "Code coverage with regression gates for Rust. Wraps cargo-llvm-cov: line / function / region coverage, stored baselines, machine-readable verdicts. Part of the dev-* verification collection."
 
 keywords = [
     "coverage",

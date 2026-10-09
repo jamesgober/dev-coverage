@@ -107,19 +107,52 @@ impl Producer for CoverageProducer {
 mod tests {
     use super::*;
 
+    use dev_report::Verdict;
+
     #[test]
-    fn produce_emits_subprocess_fail_when_tool_missing() {
-        // We can't easily mock `cargo llvm-cov` here, but if the tool
-        // happens to be installed the call succeeds and we just check
-        // that a non-empty report comes back. If absent, we get the
-        // failing critical check. Either path is acceptable for the
-        // contract: no panic, returns a Report.
+    fn produce_maps_run_failure_to_critical_fail() {
+        // Point the run at an empty directory so it fails fast whether or
+        // not cargo-llvm-cov is installed (no Cargo.toml to measure).
+        // Running it against this crate would recursively measure the
+        // crate's own test suite, which takes minutes.
+        let dir = tempfile::tempdir().unwrap();
         let producer = CoverageProducer::new(
-            CoverageRun::new("self", "0.0.0"),
+            CoverageRun::new("self", "0.0.0").in_dir(dir.path()),
             CoverageThreshold::min_line_pct(80.0),
         );
         let report = producer.produce();
         assert_eq!(report.subject, "self");
-        assert!(!report.checks.is_empty());
+        assert_eq!(report.checks.len(), 1);
+        let check = &report.checks[0];
+        assert_eq!(check.name, "coverage::self");
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert_eq!(check.severity, Some(Severity::Critical));
+        assert!(check.has_tag("subprocess"));
+    }
+
+    #[test]
+    fn produce_maps_missing_workdir_to_critical_fail() {
+        let producer = CoverageProducer::new(
+            CoverageRun::new("self", "0.0.0").in_dir("definitely/not/a/dir/7f3a"),
+            CoverageThreshold::min_line_pct(80.0),
+        )
+        .with_baseline(
+            Baseline {
+                name: "self".into(),
+                line_pct: 80.0,
+                function_pct: 80.0,
+                region_pct: 80.0,
+            },
+            1.0,
+        );
+        let report = producer.produce();
+        // No regression check without a result to compare.
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].verdict, Verdict::Fail);
+        assert!(report.checks[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("does not exist"));
     }
 }

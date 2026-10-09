@@ -69,6 +69,11 @@ pub trait BaselineStore {
 /// Keys baselines as `<root>/<scope>/<name>.json`. Save uses
 /// write-temp-rename to remain atomic on the same filesystem.
 ///
+/// `scope` and `name` must stay inside the root: empty values, `.` or
+/// `..` segments, absolute paths and drive prefixes are rejected with
+/// [`io::ErrorKind::InvalidInput`]. Nested segments such as a
+/// `feature/x` branch name are allowed.
+///
 /// # Example
 ///
 /// ```
@@ -108,29 +113,61 @@ impl JsonFileBaselineStore {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = target.with_extension("json.tmp");
-        fs::write(&tmp, contents)?;
-        // On Windows, rename will fail if the target exists; replace by
-        // removing first when present.
-        if target.exists() {
-            fs::remove_file(target)?;
+        // Per-process temp name so two processes saving the same baseline
+        // never write into one temp file.
+        let tmp = target.with_extension(format!("json.{}.tmp", std::process::id()));
+        if let Err(e) = fs::write(&tmp, contents) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
         }
-        fs::rename(&tmp, target)
+        // `fs::rename` replaces an existing target on every platform
+        // (MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows), so the
+        // old baseline stays readable until the new one is in place.
+        let renamed = fs::rename(&tmp, target);
+        if renamed.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        renamed
+    }
+}
+
+/// Reject a `scope` or `name` that would place the file outside the
+/// store root: empty values, `.` / `..` segments, absolute paths, and
+/// drive or UNC prefixes. Nested segments such as a `feature/x` branch
+/// name stay allowed.
+fn check_key(kind: &str, value: &str) -> io::Result<()> {
+    let ok = !value.is_empty()
+        && !value.contains('\0')
+        && Path::new(value)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if ok {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("baseline {kind} {value:?} must be a relative path inside the store root"),
+        ))
     }
 }
 
 impl BaselineStore for JsonFileBaselineStore {
     fn load(&self, scope: &str, name: &str) -> io::Result<Option<Baseline>> {
+        check_key("scope", scope)?;
+        check_key("name", name)?;
         let path = self.path_for(scope, name);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let text = fs::read_to_string(&path)?;
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let baseline: Baseline = serde_json::from_str(&text).map_err(io::Error::other)?;
         Ok(Some(baseline))
     }
 
     fn save(&self, scope: &str, baseline: &Baseline) -> io::Result<()> {
+        check_key("scope", scope)?;
+        check_key("name", &baseline.name)?;
         let path = self.path_for(scope, &baseline.name);
         let serialized = serde_json::to_string_pretty(baseline).map_err(io::Error::other)?;
         Self::write_atomic(&path, &serialized)
@@ -148,6 +185,36 @@ mod tests {
             function_pct: 90.0,
             region_pct: 80.0,
         }
+    }
+
+    #[test]
+    fn keys_that_escape_the_root_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let store = JsonFileBaselineStore::new(&root);
+        let mut b = fixture();
+        for scope in ["..", "../outside", "", ".", "a/../.."] {
+            let err = store.save(scope, &b).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "scope {scope:?}");
+            assert!(store.load(scope, "my-crate").is_err(), "scope {scope:?}");
+        }
+        let absolute = dir.path().join("abs").display().to_string();
+        assert!(store.save(&absolute, &b).is_err());
+        b.name = "../escape".into();
+        assert!(store.save("main", &b).is_err());
+        assert!(!dir.path().join("escape.json").exists());
+        assert!(!dir.path().join("outside").exists());
+    }
+
+    #[test]
+    fn branch_style_scopes_with_slashes_still_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonFileBaselineStore::new(dir.path());
+        store.save("feature/x", &fixture()).unwrap();
+        assert_eq!(
+            store.load("feature/x", "my-crate").unwrap(),
+            Some(fixture())
+        );
     }
 
     #[test]
@@ -178,6 +245,23 @@ mod tests {
         store.save("main", &b).unwrap();
         let back = store.load("main", "my-crate").unwrap().unwrap();
         assert_eq!(back.line_pct, 99.0);
+        // Only the baseline itself is left behind; no temp files.
+        let entries: Vec<_> = fs::read_dir(dir.path().join("main"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("my-crate.json")]);
+    }
+
+    #[test]
+    fn dotted_names_keep_their_full_file_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonFileBaselineStore::new(dir.path());
+        let mut b = fixture();
+        b.name = "my.crate".into();
+        store.save("main", &b).unwrap();
+        assert!(dir.path().join("main").join("my.crate.json").is_file());
+        assert_eq!(store.load("main", "my.crate").unwrap(), Some(b));
     }
 
     #[test]

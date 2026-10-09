@@ -47,9 +47,22 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+/// Version of this crate as compiled, taken from its `Cargo.toml`.
+///
+/// Lets tools that bundle this crate, such as the `dev` CLI in
+/// `dev-tools`, report the version that is actually linked.
+///
+/// # Example
+///
+/// ```
+/// assert!(!dev_coverage::VERSION.is_empty());
+/// ```
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use dev_report::{CheckResult, Evidence, Severity};
 use serde::{Deserialize, Serialize};
@@ -57,6 +70,7 @@ use serde::{Deserialize, Serialize};
 pub mod baseline;
 pub use baseline::{Baseline, BaselineStore, JsonFileBaselineStore};
 
+mod process;
 mod producer;
 pub use producer::CoverageProducer;
 
@@ -67,19 +81,21 @@ pub use producer::CoverageProducer;
 /// Configuration for a coverage run.
 ///
 /// Wraps `cargo llvm-cov --json --summary-only`. Use the builder methods
-/// to scope the run (working directory, workspace toggle, excludes,
-/// features), then call [`execute`](Self::execute) to invoke the
-/// subprocess and parse the result.
+/// to scope the run (working directory, workspace toggle, excluded
+/// packages, features, time limit), then call [`execute`](Self::execute)
+/// to invoke the subprocess and parse the result.
 ///
 /// # Example
 ///
 /// ```no_run
 /// use dev_coverage::CoverageRun;
+/// use std::time::Duration;
 ///
 /// let run = CoverageRun::new("my-crate", "0.1.0")
 ///     .workspace()
-///     .exclude("tests/*")
-///     .all_features();
+///     .exclude("my-crate-bench")
+///     .all_features()
+///     .timeout(Duration::from_secs(600));
 ///
 /// let _result = run.execute().unwrap();
 /// ```
@@ -94,6 +110,7 @@ pub struct CoverageRun {
     all_features: bool,
     no_default_features: bool,
     per_file: bool,
+    timeout: Option<Duration>,
 }
 
 impl CoverageRun {
@@ -114,6 +131,7 @@ impl CoverageRun {
             all_features: false,
             no_default_features: false,
             per_file: false,
+            timeout: None,
         }
     }
 
@@ -139,7 +157,11 @@ impl CoverageRun {
         self
     }
 
-    /// Pass `--exclude <pattern>`. May be called multiple times.
+    /// Pass `--exclude <spec>`. May be called multiple times.
+    ///
+    /// `cargo llvm-cov` treats the spec as a workspace *package* to leave
+    /// out of both the test run and the report (usually combined with
+    /// [`workspace`](Self::workspace)). It is not a file path pattern.
     pub fn exclude(mut self, pattern: impl Into<String>) -> Self {
         self.excludes.push(pattern.into());
         self
@@ -163,12 +185,29 @@ impl CoverageRun {
         self
     }
 
-    /// Request a per-file breakdown (drops `--summary-only`).
+    /// Keep the per-file breakdown in [`CoverageResult::files`].
     ///
-    /// Default is summary-only — much smaller JSON, faster parse. Enable
-    /// this when you need [`CoverageResult::files`] populated.
+    /// The summary export that every run requests already carries one
+    /// summary per source file, so this costs no extra tool work. It is
+    /// off by default to keep [`CoverageResult`] (and anything it is
+    /// serialized into) small.
     pub fn per_file(mut self) -> Self {
         self.per_file = true;
+        self
+    }
+
+    /// Kill `cargo llvm-cov` (and every process it started) if the run
+    /// takes longer than `limit`.
+    ///
+    /// A hung test would otherwise block [`execute`](Self::execute)
+    /// forever. When the limit expires, `execute` returns
+    /// [`CoverageError::SubprocessFailed`] with a message that starts
+    /// with `timed out after`. Default: no limit.
+    ///
+    /// On Unix the child runs in its own process group while a limit is
+    /// set, so that the whole tree can be killed at once.
+    pub fn timeout(mut self, limit: Duration) -> Self {
+        self.timeout = Some(limit);
         self
     }
 
@@ -176,20 +215,30 @@ impl CoverageRun {
     ///
     /// Returns a [`CoverageResult`] on success, or a [`CoverageError`]
     /// describing what went wrong (missing tool, subprocess failure,
-    /// parse failure).
+    /// time limit exceeded, parse failure).
     pub fn execute(&self) -> Result<CoverageResult, CoverageError> {
-        detect_tool()?;
+        if let Some(dir) = self.workdir.as_ref() {
+            if !dir.is_dir() {
+                return Err(CoverageError::SubprocessFailed(format!(
+                    "working directory does not exist: {}",
+                    dir.display()
+                )));
+            }
+        }
+        detect_tool(self.workdir.as_ref())?;
         let stdout = self.run_llvm_cov()?;
-        parse_llvm_cov_json(&stdout, self.name.clone(), self.version.clone())
+        let mut result = parse_llvm_cov_json(&stdout, self.name.clone(), self.version.clone())?;
+        if !self.per_file {
+            result.files = Vec::new();
+        }
+        Ok(result)
     }
 
     fn run_llvm_cov(&self) -> Result<String, CoverageError> {
         let mut cmd = Command::new("cargo");
-        cmd.arg("llvm-cov");
-        if !self.per_file {
-            cmd.arg("--summary-only");
-        }
-        cmd.arg("--json");
+        // Per-file summaries are part of the summary export; the full
+        // export only adds per-line segments this crate never reads.
+        cmd.args(["llvm-cov", "--summary-only", "--json"]);
         if self.workspace {
             cmd.arg("--workspace");
         }
@@ -208,26 +257,57 @@ impl CoverageRun {
         if let Some(dir) = self.workdir.as_ref() {
             cmd.current_dir(dir);
         }
-        let output = cmd
-            .output()
-            .map_err(|e| CoverageError::SubprocessFailed(e.to_string()))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(CoverageError::SubprocessFailed(stderr));
+        let output = process::output(&mut cmd, self.timeout).map_err(|e| {
+            CoverageError::SubprocessFailed(format!("could not run cargo llvm-cov: {e}"))
+        })?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match output.status {
+            None => Err(CoverageError::SubprocessFailed(format!(
+                "timed out after {:?}; process tree killed\n{}",
+                self.timeout.unwrap_or_default(),
+                stderr.trim_end()
+            ))),
+            Some(status) if !status.success() => Err(CoverageError::SubprocessFailed(format!(
+                "exited with {status}\n{}",
+                stderr.trim_end()
+            ))),
+            Some(_) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
 
-fn detect_tool() -> Result<(), CoverageError> {
-    let probe = Command::new("cargo")
-        .args(["llvm-cov", "--version"])
-        .output();
-    match probe {
+/// Probe for `cargo llvm-cov`. Runs in the same directory as the real
+/// run so a `rust-toolchain.toml` there selects the same toolchain.
+fn detect_tool(workdir: Option<&PathBuf>) -> Result<(), CoverageError> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["llvm-cov", "--version"]);
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
+    match cmd.output() {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(_) => Err(CoverageError::ToolNotInstalled),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if is_missing_subcommand(&stderr) {
+                Err(CoverageError::ToolNotInstalled)
+            } else {
+                Err(CoverageError::SubprocessFailed(format!(
+                    "`cargo llvm-cov --version` exited with {}\n{}",
+                    out.status,
+                    stderr.trim_end()
+                )))
+            }
+        }
+        // `cargo` itself could not be started (not on PATH).
         Err(_) => Err(CoverageError::ToolNotInstalled),
     }
+}
+
+/// `true` when cargo's stderr says the subcommand does not exist.
+/// Current cargo prints "no such command", older releases printed
+/// "no such subcommand".
+fn is_missing_subcommand(stderr: &str) -> bool {
+    stderr.contains("no such command") || stderr.contains("no such subcommand")
 }
 
 // ---------------------------------------------------------------------------
@@ -274,8 +354,10 @@ pub struct CoverageResult {
     pub function_pct: f64,
     /// Percentage of regions (branch points) exercised. `0.0..=100.0`.
     pub region_pct: f64,
-    /// Percentage of branches exercised. Not all builds emit branch
-    /// counts; `None` when absent.
+    /// Percentage of branches exercised. `None` when the export carries
+    /// no branch data, which is the normal case unless branch coverage
+    /// was enabled (`cargo llvm-cov` always emits a `branches` block,
+    /// with a count of zero when branch coverage is off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_pct: Option<f64>,
     /// Total executable lines.
@@ -345,7 +427,8 @@ impl CoverageResult {
         let (actual, target, label) = threshold.applied_to(&self);
         let name = format!("coverage::{}", self.name);
         let detail = format!("{label} coverage {actual:.2}% (threshold {target:.2}%)");
-        let mut check = if actual < target {
+        // A NaN threshold fails closed instead of passing every run.
+        let mut check = if actual.is_nan() || target.is_nan() || actual < target {
             CheckResult::fail(name, Severity::Warning).with_detail(detail)
         } else {
             CheckResult::pass(name).with_detail(detail)
@@ -370,7 +453,9 @@ impl CoverageResult {
     /// Returns a [`CoverageDiff`] carrying signed deltas for each metric.
     /// `tolerance_pct` is the maximum negative delta tolerated before
     /// the diff is flagged as a regression — e.g. `tolerance_pct = 1.0`
-    /// allows up to a 1-percentage-point drop without regressing.
+    /// allows up to a 1-percentage-point drop without regressing. A NaN
+    /// tolerance or percentage counts as a regression rather than
+    /// silently passing.
     ///
     /// # Example
     ///
@@ -398,12 +483,18 @@ impl CoverageResult {
         let line = self.line_pct - baseline.line_pct;
         let func = self.function_pct - baseline.function_pct;
         let region = self.region_pct - baseline.region_pct;
-        let worst = line.min(func).min(region);
+        // `f64::min` drops NaN operands, so check each delta on its own
+        // and treat NaN as a regression.
+        let floor = -tolerance_pct;
+        let regressed = floor.is_nan()
+            || [line, func, region]
+                .iter()
+                .any(|d| d.is_nan() || *d < floor);
         CoverageDiff {
             line_pct_delta: line,
             function_pct_delta: func,
             region_pct_delta: region,
-            regressed: worst < -tolerance_pct,
+            regressed,
         }
     }
 
@@ -581,7 +672,19 @@ struct LlvmCovMetric {
     #[serde(default)]
     covered: u64,
     #[serde(default)]
-    percent: f64,
+    percent: Option<f64>,
+}
+
+impl LlvmCovMetric {
+    /// The tool's own percentage, or `covered / count` when the field is
+    /// missing. Zero when nothing was counted (never NaN).
+    fn pct(&self) -> f64 {
+        match self.percent {
+            Some(p) if p.is_finite() => p,
+            _ if self.count == 0 => 0.0,
+            _ => (self.covered.min(self.count) as f64 / self.count as f64) * 100.0,
+        }
+    }
 }
 
 fn parse_llvm_cov_json(
@@ -602,9 +705,9 @@ fn parse_llvm_cov_json(
         .into_iter()
         .map(|f| FileCoverage {
             filename: f.filename,
-            line_pct: f.summary.lines.percent,
-            function_pct: f.summary.functions.percent,
-            region_pct: f.summary.regions.percent,
+            line_pct: f.summary.lines.pct(),
+            function_pct: f.summary.functions.pct(),
+            region_pct: f.summary.regions.pct(),
             total_lines: f.summary.lines.count,
             covered_lines: f.summary.lines.covered,
         })
@@ -612,10 +715,11 @@ fn parse_llvm_cov_json(
     Ok(CoverageResult {
         name,
         version,
-        line_pct: totals.lines.percent,
-        function_pct: totals.functions.percent,
-        region_pct: totals.regions.percent,
-        branch_pct: totals.branches.map(|b| b.percent),
+        line_pct: totals.lines.pct(),
+        function_pct: totals.functions.pct(),
+        region_pct: totals.regions.pct(),
+        // A zero-count block means branch coverage was not collected.
+        branch_pct: totals.branches.filter(|b| b.count > 0).map(|b| b.pct()),
         total_lines: totals.lines.count,
         covered_lines: totals.lines.covered,
         total_functions: totals.functions.count,
@@ -815,6 +919,99 @@ mod tests {
         assert_eq!(r.files[0].line_pct, 90.0);
         // No branches section in this fixture.
         assert!(r.branch_pct.is_none());
+    }
+
+    /// Captured from `cargo llvm-cov --summary-only --json` (cargo-llvm-cov
+    /// 0.8.6, LLVM export format 3.1.0) on Windows. Shows the fields the
+    /// parser must tolerate: `mcdc`, `instantiations`, `notcovered`, the
+    /// `cargo_llvm_cov` block, backslash paths, and a zero-count
+    /// `branches` block when branch coverage is off.
+    const REAL_SUMMARY_0_8_6: &str = r#"{"data":[{"files":[{"filename":"C:\\Users\\me\\tiny proj\\src\\lib.rs","summary":{"branches":{"count":0,"covered":0,"notcovered":0,"percent":0.0},"mcdc":{"count":0,"covered":0,"notcovered":0,"percent":0.0},"functions":{"count":3,"covered":2,"percent":66.66666666666666},"instantiations":{"count":3,"covered":2,"percent":66.66666666666666},"lines":{"count":3,"covered":2,"percent":66.66666666666666},"regions":{"count":13,"covered":9,"notcovered":4,"percent":69.23076923076923}}}],"totals":{"branches":{"count":0,"covered":0,"notcovered":0,"percent":0},"functions":{"count":3,"covered":2,"percent":66.66666666666666},"instantiations":{"count":3,"covered":2,"percent":66.66666666666666},"lines":{"count":3,"covered":2,"percent":66.66666666666666},"mcdc":{"count":0,"covered":0,"notcovered":0,"percent":0},"regions":{"count":13,"covered":9,"notcovered":4,"percent":69.23076923076923}}}],"type":"llvm.coverage.json.export","version":"3.1.0","cargo_llvm_cov":{"version":"0.8.6","manifest_path":"C:\\Users\\me\\tiny proj\\Cargo.toml"}}"#;
+
+    #[test]
+    fn parse_real_cargo_llvm_cov_0_8_6_summary() {
+        let r = parse_llvm_cov_json(REAL_SUMMARY_0_8_6, "tiny".into(), "0.1.0".into()).unwrap();
+        assert!((r.line_pct - 66.666_666).abs() < 1e-3);
+        assert!((r.region_pct - 69.230_769).abs() < 1e-3);
+        assert_eq!(r.total_lines, 3);
+        assert_eq!(r.covered_lines, 2);
+        assert_eq!(r.total_functions, 3);
+        assert_eq!(r.covered_regions, 9);
+        // Branch coverage was off: zero-count block must not read as 0%.
+        assert_eq!(r.branch_pct, None);
+        // The summary export already carries per-file summaries.
+        assert_eq!(r.files.len(), 1);
+        assert_eq!(r.files[0].filename, r"C:\Users\me\tiny proj\src\lib.rs");
+        assert_eq!(r.files[0].covered_lines, 2);
+    }
+
+    #[test]
+    fn parse_tolerates_crlf_whitespace() {
+        let json = REAL_SUMMARY_0_8_6.replace(",\"totals\"", ",\r\n\"totals\"");
+        let r = parse_llvm_cov_json(&json, "x".into(), "0.1.0".into()).unwrap();
+        assert_eq!(r.total_lines, 3);
+    }
+
+    #[test]
+    fn parse_computes_percent_when_field_is_missing() {
+        let json = r#"{"data":[{"totals":{
+            "lines":     { "count": 4, "covered": 3 },
+            "functions": { "count": 0, "covered": 0 },
+            "regions":   { "count": 8, "covered": 2, "percent": 25.0 },
+            "branches":  { "count": 10, "covered": 5 }
+        }}]}"#;
+        let r = parse_llvm_cov_json(json, "x".into(), "0.1.0".into()).unwrap();
+        assert_eq!(r.line_pct, 75.0);
+        // Nothing counted: 0, never NaN.
+        assert_eq!(r.function_pct, 0.0);
+        assert_eq!(r.region_pct, 25.0);
+        assert_eq!(r.branch_pct, Some(50.0));
+    }
+
+    #[test]
+    fn nan_threshold_fails_closed() {
+        let c = sample_result(90.0, 90.0, 90.0)
+            .into_check_result(CoverageThreshold::min_line_pct(f64::NAN));
+        assert_eq!(c.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn nan_tolerance_counts_as_regression() {
+        let r = sample_result(90.0, 90.0, 90.0);
+        let b = r.to_baseline();
+        assert!(r.diff(&b, f64::NAN).regressed);
+        // And a NaN baseline value cannot hide behind `f64::min`.
+        let mut nan_base = b.clone();
+        nan_base.function_pct = f64::NAN;
+        assert!(r.diff(&nan_base, 1.0).regressed);
+    }
+
+    #[test]
+    fn missing_subcommand_detection_matches_cargo_wording() {
+        // Current cargo.
+        assert!(is_missing_subcommand(
+            "error: no such command: `llvm-cov`\n\nhelp: view all installed commands with `cargo --list`"
+        ));
+        // Older cargo.
+        assert!(is_missing_subcommand(
+            "error: no such subcommand: `llvm-cov`\r\n"
+        ));
+        assert!(!is_missing_subcommand(
+            "error: toolchain 'nightly-2020-01-01' is not installed"
+        ));
+    }
+
+    #[test]
+    fn execute_reports_missing_workdir_without_panicking() {
+        let dir = std::env::temp_dir().join("dev-coverage-no-such-dir-7f3a");
+        let err = CoverageRun::new("x", "0.1.0")
+            .in_dir(&dir)
+            .execute()
+            .unwrap_err();
+        match err {
+            CoverageError::SubprocessFailed(msg) => assert!(msg.contains("does not exist")),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
