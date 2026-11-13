@@ -60,7 +60,8 @@ impl Producer for CoverageProducer {
     fn produce(&self) -> Report {
         let subject = self.run.subject().to_string();
         let version = self.run.subject_version().to_string();
-        let mut report = Report::new(&subject, &version).with_producer("dev-coverage");
+        let mut report =
+            Report::new(subject.as_str(), version.as_str()).with_producer("dev-coverage");
         match self.run.execute() {
             Ok(result) => {
                 if let Some(baseline) = &self.baseline {
